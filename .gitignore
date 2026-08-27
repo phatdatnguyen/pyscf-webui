@@ -7,10 +7,6 @@ structures/
 # Virtual environment
 pyscf-env/
 
-# A reference copy of the sibling ORCA app's source, kept for comparison while porting.
-# Not part of this package.
-orca-webui/
-
 # Editor / tooling
 __pycache__/
 .vs/
