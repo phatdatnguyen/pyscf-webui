@@ -1,0 +1,45 @@
+# Runtime state, created relative to the working directory the server is started in.
+data/
+static/
+flagged/
+structures/
+
+# Virtual environment
+pyscf-env/
+
+# A reference copy of the sibling ORCA app's source, kept for comparison while porting.
+# Not part of this package.
+orca-webui/
+
+# Editor / tooling
+__pycache__/
+.vs/
+.claude/
+.pytest_cache/
+.ruff_cache/
+
+# Python packaging / build artifacts
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Generated calculation artifacts. These only ever appear inside data/, which is already
+# ignored, but the patterns keep a stray one out of a commit if a job is run elsewhere.
+*.out
+*.log
+*.csv
+*.xyz
+*.pdb
+*.mol
+*.mol2
+*.html
+*.cube
+*.npy
+*.chk
+*.molden
+*.h5
+
+# Exported chat transcripts land at the repo root as dated .txt files.
+*.txt
+!LICENSE.txt

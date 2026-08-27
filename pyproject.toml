@@ -1,0 +1,68 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pyscf-webui"
+version = "0.1.0"
+description = "A Gradio web UI for GPU-accelerated PySCF quantum-chemistry calculations"
+readme = "Readme.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE.txt" }
+
+dependencies = [
+    "pyscf>=2.9",
+    "pyscf-dispersion",
+    # NMR J-couplings (pyscf.prop.ssc). Pure Python and small; gpu4pyscf has no spin-spin
+    # module at all, so this is the only implementation in the stack.
+    "pyscf-properties",
+    "geometric>=1.0",
+    "h5py",
+    "numpy",
+    "scipy",
+    "gradio>=5.0",
+    "fastapi",
+    "uvicorn",
+    "rdkit",
+    "nglview",
+    "ipywidgets",
+    "plotly",
+    "pandas",
+    "psutil",
+]
+
+[project.optional-dependencies]
+# GPU acceleration. The nvidia-* wheels are listed explicitly because cupy-cuda12x does
+# not pull them in, and gpu4pyscf fails at import with
+#   ImportError: Failure finding "libnvJitLink.so"
+# when they are missing -- even though `import cupy` succeeds and sees the device.
+gpu = [
+    "gpu4pyscf-cuda12x",
+    "cupy-cuda12x",
+    "nvidia-nvjitlink-cu12",
+    "nvidia-cublas-cu12",
+    "nvidia-cusolver-cu12",
+    "nvidia-cusparse-cu12",
+    "nvidia-cufft-cu12",
+    "nvidia-curand-cu12",
+    "nvidia-cuda-runtime-cu12",
+]
+dev = ["pytest", "ruff"]
+
+# The 2D sketcher in the Conformer tab is optional and CANNOT be listed above:
+# gradio_molecule2d 0.0.3 pins gradio<5 while this app needs gradio>=5, so pip would
+# downgrade Gradio and break the UI. Install it separately with:
+#     pip install --no-deps gradio_molecule2d
+# The import is guarded in conformer_generation.py, so the app runs fine without it.
+
+[project.scripts]
+pyscf-webui = "pyscf_webui.app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+pyscf_webui = ["styles.css"]
+
+[tool.ruff]
+line-length = 100
