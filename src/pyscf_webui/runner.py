@@ -46,6 +46,7 @@ import traceback
 from typing import Any
 
 from .utils import (
+    CALCULATION_TYPES,
     EMISSION,
     FREQUENCY,
     NMR,
@@ -142,7 +143,8 @@ def _print_header(spec: dict[str, Any], device: str) -> None:
         f"  basis set        : {spec.get('basis_set')}",
         f"  reference        : {spec.get('reference')}",
         f"  charge / mult    : {spec.get('charge')} / {spec.get('multiplicity')}",
-        f"  density fitting  : {spec.get('density_fit', spec.get('method_type') == 'DFT')}",
+        f"  density fitting  : "
+        f"{spec.get('density_fit', method_uses_functional(spec.get('method_type')))}",
         "  solvation        : "
         + (f"{spec.get('solvent_model', 'SMD')} / {spec.get('solvent')}"
            if spec.get("use_solvation") else "none"),
@@ -168,9 +170,10 @@ def _optimize(mf, spec: dict[str, Any]):
     out unconverted, making every structure it produced 1.89x too large, so the conversion
     happens here, once.
 
-    ``assert_convergence=False`` so a run that hits ``geom_maxiter`` still produces a full
-    result file with ``optimization.converged: false``, rather than raising and throwing
-    away the steps it did take.
+    ``kernel`` returns an unconverged geometry when ``geom_maxiter`` is exhausted, so
+    those steps can still be reported. Its separate ``assert_convergence`` switch checks
+    the electronic solver behind EACH gradient; disabling it would let unconverged SCF
+    or TD-DFT solutions steer the optimization.
     """
     import numpy
     from pyscf import lib
@@ -188,7 +191,7 @@ def _optimize(mf, spec: dict[str, Any]):
                                            {"convergence_set": "GAU"}))
     converged, mol_eq = geometric_solver.kernel(
         mf, maxsteps=int(spec.get("geom_maxiter", 50)), callback=callback,
-        assert_convergence=False, **kwargs
+        assert_convergence=True, **kwargs
     )
     return bool(converged), mol_eq, energies, frames
 
@@ -208,7 +211,7 @@ def _reconverge_at(engine, spec: dict[str, Any], mol_eq, use_gpu: bool):
     geometry instead of being carried across in a half-updated state.
     """
     mf = engine.build_scf(spec, mol_eq, use_gpu)
-    energy = float(engine.to_numpy(mf.kernel()))
+    energy = engine.run_scf(mf)
     return mf, energy
 
 
@@ -218,17 +221,10 @@ def run_job(job_path: str) -> int:
     Always writes ``<base>.result.json``, whether the calculation succeeded or failed, so
     the Result tab has something to explain.
     """
-    spec = read_json(job_path)
+    from . import engine
+
     working_directory = os.path.dirname(os.path.abspath(job_path))
     base_name = job_base_name(job_path)
-
-    # PySCF reads lib.param.TMPDIR at import time, so this has to be set before the first
-    # engine import. It keeps scratch (and geomeTRIC's temporary directory, which is
-    # allocated under the same root) inside the working directory rather than in /tmp.
-    scratch_dir = os.path.join(working_directory, "scratch")
-    os.makedirs(scratch_dir, exist_ok=True)
-    os.environ["PYSCF_TMPDIR"] = scratch_dir
-
     log_path = os.path.join(working_directory, base_name + ".log")
     result_path = os.path.join(working_directory, base_name + RESULT_SUFFIX)
 
@@ -237,24 +233,35 @@ def run_job(job_path: str) -> int:
         "status": "failed",
         "error": None,
         "engine": "pyscf",
-        "calculation_type": spec.get("calculation_type"),
-        "method_type": spec.get("method_type"),
-        "method": spec.get("method"),
-        "functional": spec.get("functional"),
-        "basis_set": spec.get("basis_set"),
-        "reference": spec.get("reference"),
-        "charge": spec.get("charge"),
-        "multiplicity": spec.get("multiplicity"),
-        "structure_file": spec.get("structure_file"),
-        "solvent": spec.get("solvent") if spec.get("use_solvation") else None,
-        "solvent_model": spec.get("solvent_model") if spec.get("use_solvation") else None,
         "log_file": os.path.basename(log_path),
     }
 
     started = time.time()
     arrays: dict[str, Any] = {}
+    use_gpu = False
     try:
-        from . import engine
+        # Read and validate inside the result-file guard, so a damaged job spec or an
+        # unwritable scratch directory still produces an explanation in the Result tab.
+        spec = read_json(job_path)
+        if not isinstance(spec, dict):
+            raise ValueError("The job specification must be a JSON object.")
+        result.update({key: spec.get(key) for key in (
+            "calculation_type", "method_type", "method", "functional", "basis_set",
+            "reference", "charge", "multiplicity", "structure_file",
+        )})
+        result["solvent"] = spec.get("solvent") if spec.get("use_solvation") else None
+        result["solvent_model"] = (
+            spec.get("solvent_model") if spec.get("use_solvation") else None
+        )
+        calculation_type = spec.get("calculation_type")
+        if calculation_type not in CALCULATION_TYPES:
+            raise ValueError(f"Unknown calculation type {calculation_type!r}.")
+
+        # PySCF reads lib.param.TMPDIR at import time, so this must precede its import.
+        # Scratch and geomeTRIC's temporary directory stay inside the working directory.
+        scratch_dir = os.path.join(working_directory, "scratch")
+        os.makedirs(scratch_dir, exist_ok=True)
+        os.environ["PYSCF_TMPDIR"] = scratch_dir
 
         import pyscf
         from pyscf import lib
@@ -270,7 +277,6 @@ def run_job(job_path: str) -> int:
         result["device"] = device
         _print_header(spec, device)
 
-        calculation_type = spec["calculation_type"]
         mol = engine.build_mol(spec, verbose=int(spec.get("verbose", 4)))
         mf = engine.build_scf(spec, mol, use_gpu)
 
@@ -291,8 +297,11 @@ def run_job(job_path: str) -> int:
                 "converged": converged,
             }
             trajectory_path = os.path.join(working_directory, base_name + "_trajectory.xyz")
-            _write_trajectory_xyz(trajectory_path, _atom_symbols(mol), frames)
-            result["trajectory_xyz_file"] = os.path.basename(trajectory_path)
+            try:
+                _write_trajectory_xyz(trajectory_path, _atom_symbols(mol), frames)
+                result["trajectory_xyz_file"] = os.path.basename(trajectory_path)
+            except Exception as exc:
+                print(f"Could not write the optimization trajectory ({exc}).", file=sys.stderr)
             arrays["opt_energies"] = energies
 
         elif calculation_type == FREQUENCY:
@@ -303,6 +312,12 @@ def run_job(job_path: str) -> int:
             converged, mol_eq, energies, _frames = _optimize(mf, spec)
             mf, energy = _reconverge_at(engine, spec, mol_eq, use_gpu)
             mol = mf.mol
+            result["optimization"] = {
+                "energies_hartree": energies,
+                "n_steps": len(energies),
+                "converged": converged,
+            }
+            arrays["opt_energies"] = energies
             if not converged:
                 print("Warning: the geometry optimization did not converge; the "
                       "frequencies below are not those of a stationary point.", flush=True)
@@ -311,7 +326,7 @@ def run_job(job_path: str) -> int:
             arrays.update(frequency_arrays)
 
         elif calculation_type == TDDFT:
-            energy = float(engine.to_numpy(mf.kernel()))
+            energy = engine.run_scf(mf)
             td = engine.build_tddft(mf, spec)
             fragment, excitation_arrays = engine.excitation_results(td)
             result.update(fragment)
@@ -325,7 +340,7 @@ def run_job(job_path: str) -> int:
             reason = engine.nmr_unavailable_reason(spec, use_gpu)
             if reason:
                 raise RuntimeError(reason)
-            energy = float(engine.to_numpy(mf.kernel()))
+            energy = engine.run_scf(mf)
             fragment, nmr_arrays = engine.nmr_shielding(mf, spec)
             arrays.update(nmr_arrays)
             if spec.get("compute_j_couplings"):
@@ -347,7 +362,7 @@ def run_job(job_path: str) -> int:
             result.update(emission_fragment)
 
         else:  # SINGLE_POINT
-            energy = float(engine.to_numpy(mf.kernel()))
+            energy = engine.run_scf(mf)
             if spec.get("method_type") in ("MP2", "CCSD", "CCSD(T)"):
                 energy = engine.correlated_energy(spec, mf)
 
@@ -363,9 +378,12 @@ def run_job(job_path: str) -> int:
             # Charge and multiplicity are taken from the Mole the calculation actually
             # ran with rather than from the spec, so the saved structure can never be
             # labelled with a spin state the numbers do not belong to.
-            _write_xyz(optimized_path, symbols, result["geometry_angstrom"],
-                       int(mol.charge), int(mol.spin) + 1)
-            result["optimized_xyz_file"] = os.path.basename(optimized_path)
+            try:
+                _write_xyz(optimized_path, symbols, result["geometry_angstrom"],
+                           int(mol.charge), int(mol.spin) + 1)
+                result["optimized_xyz_file"] = os.path.basename(optimized_path)
+            except Exception as exc:
+                print(f"Could not write the optimized geometry ({exc}).", file=sys.stderr)
 
         _write_artifacts(engine, spec, mol, mf, energy, arrays,
                          working_directory, base_name, result)
@@ -373,12 +391,17 @@ def run_job(job_path: str) -> int:
         result["status"] = "completed"
         exit_code = 0
     except Exception as exc:
+        if isinstance(exc, engine.ConvergenceError):
+            result["converged"] = False
         result["error"] = f"{type(exc).__name__}: {exc}"
         result["traceback"] = traceback.format_exc()
         print(result["traceback"], file=sys.stderr, flush=True)
         exit_code = 1
     finally:
-        _release_gpu_memory()
+        # Creating a CUDA context solely to clean up a CPU job can fail on a broken
+        # optional GPU stack before the otherwise successful result gets written.
+        if use_gpu:
+            _release_gpu_memory()
 
     result["duration_seconds"] = time.time() - started
     write_json(result_path, result)
@@ -403,7 +426,7 @@ def _run_emission(engine, spec: dict[str, Any], mf, use_gpu: bool):
     """
     root = int(spec.get("root", 1))
 
-    mf.kernel()
+    engine.run_scf(mf)
     td = engine.build_tddft(mf, spec)
     absorption_hartree = float(engine.to_numpy(td.e)[root - 1])
 
@@ -560,8 +583,6 @@ def run_cubegen(spec_path: str) -> int:
     except Exception:
         traceback.print_exc()
         return 1
-    finally:
-        _release_gpu_memory()
 
 
 def probe_gpu() -> int:

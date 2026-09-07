@@ -62,3 +62,21 @@ def water_result():
         "wavefunction_file": "sp.chk",
         "duration_seconds": 2.0,
     }
+
+
+@pytest.fixture
+def partial_excitation_result(water_result):
+    """Transition energies remain valid when an optional strength is unavailable."""
+    result = dict(water_result)
+    result["calculation_type"] = "Time-Dependent Density Functional Theory"
+    result["excitations"] = [
+        {"index": 1, "energy_hartree": 0.15, "energy_ev": 4.0817,
+         "wavenumber_cm1": 32921.19, "wavelength_nm": 303.76,
+         "oscillator_strength": None, "rotatory_strength": 1.2,
+         "spin": "", "symmetry": ""},
+        {"index": 2, "energy_hartree": 0.2, "energy_ev": 5.4423,
+         "wavenumber_cm1": 43894.93, "wavelength_nm": 227.82,
+         "oscillator_strength": 0.3, "rotatory_strength": None,
+         "spin": "", "symmetry": ""},
+    ]
+    return result

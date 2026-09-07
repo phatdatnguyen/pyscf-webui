@@ -161,10 +161,18 @@ def _excitation_dataframe(excitations):
         "State": state["index"],
         "Wavelength (nm)": "" if state.get("wavelength_nm") is None else "{:.2f}".format(state["wavelength_nm"]),
         "Energy (eV)": "{:.4f}".format(state["energy_ev"]),
-        "Oscillator strength": "{:.6f}".format(state["oscillator_strength"]),
-        "Rotatory strength": "{:.6f}".format(state["rotatory_strength"]),
+        "Oscillator strength": "" if state.get("oscillator_strength") is None
+                               else "{:.6f}".format(state["oscillator_strength"]),
+        "Rotatory strength": "" if state.get("rotatory_strength") is None
+                             else "{:.6f}".format(state["rotatory_strength"]),
         "Symmetry": state.get("symmetry", ""),
     } for state in excitations])
+
+
+def _states_with_strength(excitations, strength_key):
+    """Keep only bands with both a wavelength and a computed transition strength."""
+    return [state for state in excitations
+            if state.get("wavelength_nm") and state.get(strength_key) is not None]
 
 
 def _emission_figure(emission):
@@ -225,7 +233,8 @@ DEFAULT_H_REFERENCE, DEFAULT_C_REFERENCE = TMS_REFERENCES["B3LYP/pcseg-2"]
 def _parse_reference(value, default):
     """Read a reference-shielding textbox, falling back on blank or unparseable input."""
     try:
-        return float(value)
+        parsed = float(value)
+        return parsed if np.isfinite(parsed) else default
     except (TypeError, ValueError):
         return default
 
@@ -305,6 +314,8 @@ def _nmr_outputs(result, h_reference, c_reference, average_equivalent,
                   "C": _parse_reference(c_reference, DEFAULT_C_REFERENCE)}
     couplings = (nmr or {}).get("couplings") or []
     frequency = _parse_reference(spectrometer_mhz, DEFAULT_SPECTROMETER_MHZ)
+    if frequency <= 0:
+        frequency = DEFAULT_SPECTROMETER_MHZ
 
     equivalence = None
     if average_equivalent:
@@ -335,7 +346,7 @@ def _nmr_outputs(result, h_reference, c_reference, average_equivalent,
 # Number of values :func:`on_load_result_file` returns, i.e. the length of
 # ``_result_outputs`` in :func:`result_tab_content`. The two must stay index-aligned;
 # ``test_handlers.py`` asserts it rather than leaving it to review.
-RESULT_OUTPUT_COUNT = 29
+RESULT_OUTPUT_COUNT = 30
 
 
 def _blank_outputs(status):
@@ -349,6 +360,7 @@ def _blank_outputs(status):
         gr.update(visible=False), gr.update(choices=[], value=None), None,
         gr.update(visible=False), None, None,
         gr.update(visible=False), None, None, None, None, None,
+        None,
     )
 
 
@@ -369,6 +381,14 @@ def on_load_result_file(working_directory_path, result_file_name,
     try:
         result_path = os.path.join(working_directory_path, result_file_name)
         result = read_json(result_path)
+        if not isinstance(result, dict):
+            raise ValueError("The result file must contain a JSON object.")
+        # This is session state, never written back into the result-file schema. It
+        # keeps a changed dropdown/directory from pairing an old geometry with a new
+        # checkpoint when Visualize is clicked before Load.
+        result["_source_path"] = os.path.abspath(result_path)
+        source_stat = os.stat(result_path)
+        result["_source_mtime_ns"] = source_stat.st_mtime_ns
     except Exception as exc:
         return _blank_outputs(f"<span style='color:red;'>Error loading result file: {exc}</span>")
 
@@ -376,6 +396,14 @@ def on_load_result_file(working_directory_path, result_file_name,
         error = result.get("error") or "the calculation did not finish"
         return _blank_outputs(
             f"<span style='color:red;'>This calculation failed: {error}</span>"
+        )
+    if result.get("converged") is False:
+        # Older runner versions marked an exhausted SCF as completed and proceeded to
+        # derived properties. A successful file load must not legitimize those numbers.
+        return _blank_outputs(
+            "<span style='color:red;'>The SCF calculation did not converge. "
+            "Its energies and derived properties are unreliable; rerun the calculation "
+            "with converged SCF settings.</span>"
         )
 
     try:
@@ -389,6 +417,7 @@ def on_load_result_file(working_directory_path, result_file_name,
 
         # --- Geometry optimization ------------------------------------------------
         optimization = result.get("optimization")
+        unconverged_geometry = bool(optimization and optimization.get("converged") is False)
         show_optimization = bool(optimization and optimization.get("energies_hartree"))
         optimization_figure = (
             _optimization_figure(optimization["energies_hartree"]) if show_optimization else None
@@ -406,6 +435,13 @@ def on_load_result_file(working_directory_path, result_file_name,
             raw_intensities = frequency.get("ir_intensities_km_mol")
             real = frequencies > 0
             notes = []
+            if unconverged_geometry:
+                notes.append(
+                    "<span style='color:orange;'>The geometry optimization did not converge. "
+                    "The geometry is not confirmed to be stationary; do not interpret "
+                    "these frequencies or thermochemistry as results at a converged "
+                    "geometry.</span>"
+                )
             if raw_intensities:
                 intensities = np.asarray(raw_intensities, dtype=float)
                 ir_spectrum = generate_ir_spectrum_interactive(
@@ -436,18 +472,22 @@ def on_load_result_file(working_directory_path, result_file_name,
 
         # --- Absorption / ECD ------------------------------------------------------
         excitations = result.get("excitations") or []
-        # A state with no wavelength (a non-positive root) cannot be plotted.
-        plottable = [s for s in excitations if s.get("wavelength_nm")]
-        show_excitations = bool(plottable)
+        # Transition energies remain useful when a property routine cannot produce
+        # the oscillator/rotatory strengths. Keep the table, and omit only those bands.
+        absorption_states = _states_with_strength(excitations, "oscillator_strength")
+        ecd_states = _states_with_strength(excitations, "rotatory_strength")
+        show_excitations = bool(excitations)
         if show_excitations:
             excitation_dataframe = _excitation_dataframe(excitations)
-            wavelengths = [s["wavelength_nm"] for s in plottable]
-            absorption_spectrum = generate_absorption_emission_spectrum_interactive(
-                wavelengths, [s["oscillator_strength"] for s in plottable]
+            absorption_spectrum = (
+                generate_absorption_emission_spectrum_interactive(
+                    [s["wavelength_nm"] for s in absorption_states],
+                    [s["oscillator_strength"] for s in absorption_states],
+                ) if absorption_states else None
             )
             # ECD is only meaningful when something is actually chiral; an achiral
             # molecule gives rotatory strengths that are all zero and a flat line.
-            has_ecd = any(abs(s["rotatory_strength"]) > 1e-10 for s in plottable)
+            has_ecd = any(abs(s["rotatory_strength"]) > 1e-10 for s in ecd_states)
         else:
             excitation_dataframe = absorption_spectrum = None
             has_ecd = False
@@ -462,7 +502,20 @@ def on_load_result_file(working_directory_path, result_file_name,
         show_orbitals = bool(result.get("wavefunction_file"))
         visualization_choices = _visualization_choices(result) if show_orbitals else []
 
-        status = f"<span style='color:green;'>Loaded {result_file_name}.</span>"
+        warnings = []
+        if any(s.get("oscillator_strength") is None or s.get("rotatory_strength") is None
+               for s in excitations):
+            warnings.append("Some transition strengths are unavailable. They are blank in "
+                            "the table and omitted from the corresponding spectrum.")
+        if unconverged_geometry:
+            warnings.append("Geometry optimization did not converge; the available results "
+                            "describe the last geometry.")
+        if emission and emission.get("converged") is False:
+            warnings.append("Excited-state optimization did not converge; the emission "
+                            "energy is from the last geometry and may change on relaxation.")
+        color = "orange" if warnings else "green"
+        message = " ".join([f"Loaded {result_file_name}.", *warnings])
+        status = f"<span style='color:{color};'>{message}</span>"
         return (
             status, result,
             gr.update(visible=show_energy), energy_text, dipole_text, mo_dataframe,
@@ -476,6 +529,7 @@ def on_load_result_file(working_directory_path, result_file_name,
             gr.update(visible=show_emission), emission_dataframe, emission_figure,
             *_nmr_outputs(result, h_reference, c_reference, average_equivalent,
                           spectrometer_mhz),
+            None,  # Clear the previous result's ECD spectrum on every load.
         )
     except Exception as exc:
         return _blank_outputs(f"<span style='color:red;'>Error rendering result: {exc}</span>")
@@ -484,9 +538,9 @@ def on_load_result_file(working_directory_path, result_file_name,
 def on_show_ecd_spectrum(result):
     """Build the ECD spectrum from the loaded result's rotatory strengths."""
     excitations = (result or {}).get("excitations") or []
-    plottable = [s for s in excitations if s.get("wavelength_nm")]
+    plottable = _states_with_strength(excitations, "rotatory_strength")
     if not plottable:
-        gr.Warning("This result has no excited states to plot.")
+        gr.Warning("This result has no available rotatory strengths to plot.")
         return None
     return generate_ecd_spectrum_interactive(
         [s["wavelength_nm"] for s in plottable],
@@ -522,8 +576,16 @@ def on_visualize(working_directory_path, result_file_name, result, selection,
         gr.Warning("Please choose something to visualize.")
         return None
 
-    base_name = result_base_name(result_file_name)
     try:
+        if not working_directory_path or not result_file_name:
+            gr.Warning("Please select and load a result file first.")
+            return None
+        source_path = os.path.abspath(os.path.join(working_directory_path, result_file_name))
+        if (result.get("_source_path") != source_path
+                or result.get("_source_mtime_ns") != os.stat(source_path).st_mtime_ns):
+            gr.Warning("Please load the selected result before visualizing it.")
+            return None
+        base_name = result_base_name(result_file_name)
         if selection.startswith("MO "):
             # "MO 7" -> orbital 7, 1-based. Unlike Psi4, which asked for the alpha and
             # beta index of the same orbital as a positive/negative pair, cubegen takes a
@@ -560,7 +622,8 @@ def on_visualize(working_directory_path, result_file_name, result, selection,
             cwd=working_directory_path, capture_output=True, text=True,
         )
         if completed.returncode != 0:
-            gr.Warning(f"Could not generate the cube file:\n{completed.stdout[-2000:]}")
+            detail = (completed.stdout + completed.stderr)[-2000:]
+            gr.Warning(f"Could not generate the cube file:\n{detail}")
             return None
 
         return render_cube_html(
@@ -575,7 +638,17 @@ def on_visualize(working_directory_path, result_file_name, result, selection,
 def on_export_data(working_directory_path, file_name, dataframe):
     """Export a result DataFrame to ``<file_name>.csv`` in the working directory."""
     try:
-        file_path = os.path.join(working_directory_path, file_name + ".csv")
+        if not working_directory_path:
+            raise ValueError("Please open a working directory first.")
+        if (not file_name or not file_name.strip() or file_name in (".", "..")
+                or any(c in file_name for c in ("/", "\\", "\0"))):
+            raise ValueError("Use an export file name without directory separators.")
+        directory = os.path.realpath(working_directory_path)
+        file_path = os.path.join(directory, file_name + ".csv")
+        # A plain name can still resolve outside the directory through an existing
+        # symlink; protect that target before pandas opens it for writing.
+        if os.path.commonpath((directory, os.path.realpath(file_path))) != directory:
+            raise ValueError("Export files must stay inside the working directory.")
         dataframe.to_csv(file_path, encoding="utf-8", index=False)
         return ("<span style='color:green;'>Data exported successfully.</span>",
                 get_files_in_working_directory(working_directory_path))
@@ -696,6 +769,7 @@ def result_tab_content(working_directory_path_state, working_directory_file_list
         emission_accordion, emission_dataframe_component, emission_plot,
         nmr_accordion, nmr_dataframe,
         nmr_1h_dataframe, nmr_1h_plot, nmr_13c_dataframe, nmr_13c_plot,
+        ecd_plot,
     ]
 
     # The NMR panel re-renders from the already-loaded result rather than re-reading the

@@ -20,7 +20,9 @@ dependencies = [
     "h5py",
     "numpy",
     "scipy",
-    "gradio>=5.0",
+    # Blocks(css_paths=...) and Dataframe row_count tuples use the Gradio 5 API.
+    # Gradio 6 removes these; keep fresh installs on the supported major version.
+    "gradio>=5.0,<6.0",
     "fastapi",
     "uvicorn",
     "rdkit",

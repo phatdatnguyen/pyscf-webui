@@ -51,6 +51,10 @@ SOLVENT_DB: dict[str, tuple[float, str]] = {
 _DISPERSION_SUFFIXES = ("-D3BJ", "-D3ZERO", "-D4", "-D3")
 
 
+class ConvergenceError(RuntimeError):
+    """A solver returned approximate results without satisfying its convergence test."""
+
+
 def split_dispersion(functional: str) -> tuple[str, str | None]:
     """Split ``"B3LYP-D3BJ"`` into ``("B3LYP", "d3bj")``.
 
@@ -240,6 +244,11 @@ def correlated_energy(spec: dict[str, Any], mf) -> float:
     from pyscf import cc
 
     ccsd = cc.CCSD(mf_cpu).run()
+    if not ccsd.converged:
+        raise ConvergenceError(
+            "CCSD did not converge; its energy and any (T) correction cannot be reported "
+            "as a completed calculation. Adjust the method or SCF reference and retry."
+        )
     if method_type == "CCSD(T)":
         return float(ccsd.e_tot + ccsd.ccsd_t())
     return float(ccsd.e_tot)
@@ -248,6 +257,19 @@ def correlated_energy(spec: dict[str, Any], mf) -> float:
 # ---------------------------------------------------------------------------
 # Reading results off a converged calculation
 # ---------------------------------------------------------------------------
+
+def run_scf(mf) -> float:
+    """Run SCF and reject unconverged orbitals before computing derived properties."""
+    energy = float(to_numpy(mf.kernel()))
+    if not mf.converged:
+        # PySCF returns an energy even when max_cycle is exhausted. Treating that as
+        # success can silently feed an unconverged wavefunction into TD-DFT or NMR.
+        raise ConvergenceError(
+            f"SCF did not converge within {mf.max_cycle} cycles. Increase the SCF cycle "
+            "limit or adjust the reference, method, or starting geometry and retry."
+        )
+    return energy
+
 
 def scf_summary(mf) -> dict[str, Any]:
     """Orbital energies, occupations and the dipole -- fields every result carries."""
@@ -313,18 +335,28 @@ def frequency_analysis(mf, spec: dict[str, Any], use_gpu: bool) -> tuple[dict[st
     reference_frequencies = None
 
     if use_gpu and _supports_gpu_ir(mf):
-        from gpu4pyscf.properties import ir as gpu_ir
+        hessian_obj = None
+        try:
+            from gpu4pyscf.properties import ir as gpu_ir
 
-        hessian_obj = mf.Hessian()
-        reference_frequencies, intensities = gpu_ir.eval_ir_freq_intensity(mf, hessian_obj)
-        reference_frequencies = numpy.asarray(
-            to_numpy(reference_frequencies), dtype=float).ravel()
-        intensities = numpy.asarray(to_numpy(intensities), dtype=float).ravel()
-        # eval_ir_freq_intensity runs the Hessian itself and leaves it on the object;
-        # reusing it avoids paying for the most expensive step of the job twice.
+            hessian_obj = mf.Hessian()
+            reference_frequencies, intensities = gpu_ir.eval_ir_freq_intensity(mf, hessian_obj)
+            reference_frequencies = numpy.asarray(
+                to_numpy(reference_frequencies), dtype=float).ravel()
+            intensities = numpy.asarray(to_numpy(intensities), dtype=float).ravel()
+        except Exception as exc:
+            # IR also solves a dipole response after the Hessian. Failure in that optional
+            # property must not discard the geometry or the already-computed frequencies.
+            print(f"Warning: GPU IR intensities unavailable ({type(exc).__name__}: {exc}); "
+                  "reporting frequencies without intensities.")
+            reference_frequencies = intensities = None
+
+        # eval_ir_freq_intensity leaves a completed Hessian on the object even if the
+        # later dipole response fails. An uncomputed GPU Hessian starts with an EMPTY
+        # .de array, so checking only for None would accept it as a usable Hessian.
         hessian = to_numpy(getattr(hessian_obj, "de", None))
-        if hessian is None:
-            hessian = to_numpy(hessian_obj.kernel())
+        if hessian is None or hessian.shape != (mol.natm, mol.natm, 3, 3):
+            mf, hessian = _hessian_with_cpu_fallback(mf)
     else:
         if use_gpu:
             print("Note: IR intensities are only implemented for a restricted reference; "
@@ -661,11 +693,23 @@ def build_tddft(mf, spec: dict[str, Any]):
     """Construct and solve the TD-DFT problem for ``spec``, returning the solver object."""
     n_states = int(spec.get("n_states", 10))
     root = int(spec.get("root", 1))
+    if n_states < 1 or root < 1:
+        raise ValueError("The number of excited states and the excited-state root must be >= 1.")
     td = mf.TDA() if spec.get("tda") else mf.TDDFT()
     # Asking for fewer states than the root being followed would make the Emission branch
     # index past the end of the solution vector.
     td.nstates = max(n_states, root)
     td.kernel()
+    if not to_numpy(td.converged).all():
+        raise ConvergenceError(
+            "TD-DFT did not converge for every computed excited state. Try TDA or adjust "
+            "the method, basis, or number of requested states and retry."
+        )
+    if len(td.e) < root:
+        raise ValueError(
+            f"Excited-state root {root} was requested, but the solver returned only "
+            f"{len(td.e)} states. Choose a lower root or a larger basis."
+        )
     return td
 
 
@@ -696,7 +740,7 @@ def excitation_results(td) -> tuple[dict[str, Any], dict]:
             to_numpy(td_host.oscillator_strength(gauge="length")), dtype=float).ravel()
     except Exception as exc:
         print(f"Warning: oscillator strengths unavailable ({exc}).")
-        strengths = numpy.zeros_like(energies)
+        strengths = None
 
     try:
         electric = numpy.asarray(to_numpy(transition_dipole(td_host)), dtype=float)
@@ -706,7 +750,7 @@ def excitation_results(td) -> tuple[dict[str, Any], dict]:
         print(f"Warning: rotatory strengths unavailable ({exc}); the ECD plot will be "
               f"disabled for this calculation.")
         electric = magnetic = None
-        rotatory = numpy.zeros_like(energies)
+        rotatory = None
 
     excitations = []
     for index, energy in enumerate(energies, start=1):
@@ -718,8 +762,12 @@ def excitation_results(td) -> tuple[dict[str, Any], dict]:
             "wavenumber_cm1": wavenumber,
             # 1e7 nm per cm; a non-positive root would be unphysical, so guard the divide.
             "wavelength_nm": (1.0e7 / wavenumber) if wavenumber > 0 else None,
-            "oscillator_strength": float(strengths[index - 1]),
-            "rotatory_strength": float(rotatory[index - 1]),
+            # Missing transition properties are unknown, not physically zero (a forbidden
+            # transition or an achiral response). The table and plots distinguish these.
+            "oscillator_strength": (
+                float(strengths[index - 1]) if strengths is not None else None),
+            "rotatory_strength": (
+                float(rotatory[index - 1]) if rotatory is not None else None),
             "spin": "",
             # PySCF runs without symmetry here (see build_mol), so there are no irrep
             # labels to report. The column stays in the schema so the Result tab and any
@@ -729,9 +777,11 @@ def excitation_results(td) -> tuple[dict[str, Any], dict]:
 
     arrays: dict[str, Any] = {
         "excitation_energies_hartree": energies,
-        "oscillator_strength": strengths,
-        "rotatory_strength": rotatory,
     }
+    if strengths is not None:
+        arrays["oscillator_strength"] = strengths
+    if rotatory is not None:
+        arrays["rotatory_strength"] = rotatory
     if electric is not None:
         arrays["transition_dipole"] = electric
         arrays["transition_magnetic_dipole"] = magnetic
@@ -781,19 +831,26 @@ def load_chkfile(path: str):
 def density_matrices(mo_coeff, mo_occ):
     """Alpha and beta density matrices from MO coefficients and occupations.
 
-    Returns ``(dm_alpha, dm_beta)``. For a restricted set the two are identical halves of
-    the total density, so callers can treat both cases uniformly: the total is always
-    ``dm_alpha + dm_beta`` and the spin density always ``dm_alpha - dm_beta``.
+    Returns ``(dm_alpha, dm_beta)``. Closed-shell restricted orbitals give identical
+    densities; restricted open-shell orbitals put the singly occupied electrons in alpha,
+    matching PySCF's positive-spin convention. The total is always ``dm_alpha + dm_beta``
+    and the spin density always ``dm_alpha - dm_beta``.
     """
     import numpy
 
-    if numpy.asarray(mo_coeff).ndim == 3:  # unrestricted
-        dm_alpha = (mo_coeff[0] * mo_occ[0]).dot(mo_coeff[0].T)
-        dm_beta = (mo_coeff[1] * mo_occ[1]).dot(mo_coeff[1].T)
+    mo_coeff = numpy.asarray(mo_coeff)
+    mo_occ = numpy.asarray(mo_occ)
+    if mo_coeff.ndim == 3:  # unrestricted
+        dm_alpha = (mo_coeff[0] * mo_occ[0]).dot(mo_coeff[0].conj().T)
+        dm_beta = (mo_coeff[1] * mo_occ[1]).dot(mo_coeff[1].conj().T)
         return dm_alpha, dm_beta
-    half = numpy.asarray(mo_occ, dtype=float) / 2.0
-    dm_half = (mo_coeff * half).dot(mo_coeff.T)
-    return dm_half, dm_half
+    # Halving ROHF/ROKS occupations would erase the spin density entirely while still
+    # producing the correct total density, making a plausible but wrong cube file.
+    occ_alpha = numpy.minimum(mo_occ, 1.0)
+    occ_beta = numpy.maximum(mo_occ - 1.0, 0.0)
+    dm_alpha = (mo_coeff * occ_alpha).dot(mo_coeff.conj().T)
+    dm_beta = (mo_coeff * occ_beta).dot(mo_coeff.conj().T)
+    return dm_alpha, dm_beta
 
 
 def save_molden(mol, mo_coeff, mo_occ, mo_energy, path: str) -> str:

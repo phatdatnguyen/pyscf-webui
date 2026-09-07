@@ -18,6 +18,7 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
+from . import visualization
 from .working_directory import working_directory_blocks
 from .conformer_generation import conformer_generation_tab_content
 from .calculation import calculation_tab_content
@@ -55,14 +56,16 @@ def _cleanup_transient_files(run_dir: Path) -> None:
 
 def find_available_port(start_port: int = 7860) -> int:
     """Return the first TCP port at/after ``start_port`` that can be bound on localhost."""
-    port = start_port
-    while True:
+    if not 1 <= start_port <= 65535:
+        raise ValueError("The starting port must be between 1 and 65535.")
+    for port in range(start_port, 65536):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             try:
-                s.bind(('localhost', port))
+                s.bind(('127.0.0.1', port))
                 return port  # Available port found
             except OSError:
-                port += 1  # Try next port
+                continue
+    raise OSError(f"No available TCP port at or above {start_port}.")
 
 
 def build_app(run_dir: Path | None = None) -> FastAPI:
@@ -71,7 +74,7 @@ def build_app(run_dir: Path | None = None) -> FastAPI:
     ``run_dir`` (default: current working directory) is where the ``data/`` and
     ``static/`` directories are created and served from.
     """
-    run_dir = Path.cwd() if run_dir is None else run_dir
+    run_dir = (Path.cwd() if run_dir is None else Path(run_dir)).resolve()
     _cleanup_transient_files(run_dir)
 
     app = FastAPI()
@@ -80,13 +83,16 @@ def build_app(run_dir: Path | None = None) -> FastAPI:
     (run_dir / "data").mkdir(parents=True, exist_ok=True)
     static_dir = run_dir / "static"
     static_dir.mkdir(parents=True, exist_ok=True)
+    # The viewers run later in callbacks, so they must write to the same absolute
+    # directory that this server mounts even when run_dir differs from the cwd.
+    visualization._STATIC_DIR = str(static_dir)
 
     # mount FastAPI StaticFiles server
     app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
     with gr.Blocks(css_paths=_STYLES_PATH) as blocks:
         with gr.Row():
-            working_directory_path_state, working_directory_file_list_state = working_directory_blocks()
+            working_directory_path_state, working_directory_file_list_state = working_directory_blocks(run_dir / "data")
             with gr.Column(scale=2):
                 with gr.Row(min_height=40):
                     status_markdown = gr.Markdown()

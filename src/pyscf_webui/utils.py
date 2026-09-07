@@ -16,6 +16,7 @@ context it does not use. The engine is imported only inside the runner subproces
 from __future__ import annotations
 
 import json
+import math
 import os
 from typing import Any
 
@@ -61,7 +62,13 @@ def get_files_in_working_directory(working_directory_path: str) -> list[str]:
     """
     if not working_directory_path:
         return []
-    return [f for f in os.listdir(working_directory_path)
+    try:
+        files = os.listdir(working_directory_path)
+    except (FileNotFoundError, NotADirectoryError):
+        # Handlers also refresh this list while reporting a failed file operation;
+        # a directory moved or deleted in another session must not break that path.
+        return []
+    return [f for f in files
             if not f.endswith('Zone.Identifier')
             and os.path.isfile(os.path.join(working_directory_path, f))]
 
@@ -184,15 +191,33 @@ def mol_from_xyz_file(file_path: str, return_charge_and_multiplicity: bool = Fal
         except ValueError:
             charge, multiplicity = 0, 1
     elif len(first_fields) == 1:
-        # Standard XYZ: keep only the trailing ``n_atoms`` atom lines, i.e. the last frame.
         try:
             n_atoms = int(first_fields[0])
         except ValueError:
-            n_atoms = 0
-        if n_atoms > 0:
-            atom_lines = [line for line in lines if len(line.split()) == 4]
-            if len(atom_lines) >= n_atoms:
-                lines = [""] + atom_lines[-n_atoms:]
+            n_atoms = None
+        if n_atoms is not None:
+            # Read frame boundaries, including the mandatory comment line. Taking
+            # the last N four-field lines can silently splice two geometries when a
+            # trajectory's final frame is incomplete, or misread a comment as an atom.
+            cursor = 0
+            last_frame = None
+            while cursor < len(lines):
+                if not lines[cursor].strip():
+                    cursor += 1
+                    continue
+                try:
+                    n_atoms = int(lines[cursor].strip())
+                except ValueError as exc:
+                    raise ValueError(f"Invalid XYZ atom count on line {cursor + 1}.") from exc
+                if n_atoms <= 0:
+                    raise ValueError("An XYZ frame must contain at least one atom.")
+                start, end = cursor + 2, cursor + 2 + n_atoms
+                frame = lines[start:end]
+                if len(frame) != n_atoms or any(len(line.split()) != 4 for line in frame):
+                    raise ValueError(f"Incomplete or malformed XYZ frame on line {cursor + 1}.")
+                last_frame = frame
+                cursor = end
+            lines = [""] + last_frame
 
     # Create a new empty molecule
     mol = Chem.RWMol()
@@ -744,16 +769,18 @@ def format_couplings_by_atom(couplings, decimals=2) -> dict[int, str]:
 def _multiplet_lines(peak, spectrometer_mhz):
     """Split one peak into its first-order multiplet lines as ``(shift_ppm, weight)``.
 
-    Each coupled partner group halves the weight and splits by J/2, repeated once per
-    partner nucleus -- which is exactly how a Pascal triangle is generated, so an n-partner
-    group gives the 1:n:...:1 intensity pattern without tabulating binomial coefficients.
+    Equivalent partners give n+1 lines with binomial weights. Enumerating every
+    individual spin configuration instead produces 2**n duplicate lines and can exhaust
+    memory before a spectrum is drawn, even though its observable multiplet is small.
     """
     lines = [(peak["shift"], 1.0)]
     for coupling in peak.get("couplings") or []:
-        half_j_ppm = (coupling["j_hz"] / 2.0) / spectrometer_mhz
-        for _ in range(coupling["n"]):
-            lines = ([(position - half_j_ppm, weight / 2.0) for position, weight in lines]
-                     + [(position + half_j_ppm, weight / 2.0) for position, weight in lines])
+        n = coupling["n"]
+        j_ppm = coupling["j_hz"] / spectrometer_mhz
+        components = [((k - n / 2) * j_ppm, math.comb(n, k) / 2**n)
+                      for k in range(n + 1)]
+        lines = [(position + offset, weight * fraction)
+                 for position, weight in lines for offset, fraction in components]
     return lines
 
 
@@ -775,6 +802,9 @@ def generate_nmr_spectrum_interactive(peaks, element_symbol, spectrometer_mhz=40
     """
     if not peaks:
         return None
+
+    if not np.isfinite(spectrometer_mhz) or spectrometer_mhz <= 0:
+        raise ValueError("Spectrometer frequency must be a positive finite number.")
 
     linewidth_ppm = max(linewidth_hz, 1e-6) / max(spectrometer_mhz, 1e-6)
     all_lines = [(peak, _multiplet_lines(peak, spectrometer_mhz)) for peak in peaks]

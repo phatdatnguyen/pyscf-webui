@@ -6,6 +6,8 @@ both close in energy AND superimposable on an accepted conformer. Survivors are 
 into the working directory as .xyz/.pdb/.mol, ready for the Calculation tab.
 """
 import os
+import math
+from pathlib import Path
 import pandas as pd
 from rdkit import Chem
 from rdkit.Chem import AllChem, rdMolAlign
@@ -29,6 +31,8 @@ OVERSAMPLING_FACTOR = 4
 MAX_BATCH_SIZE = 250
 
 def on_draw_molecule(molecule_editor):
+    if not molecule_editor:
+        return ""
     mol = Chem.MolFromSmiles(molecule_editor)
     if mol is None:
         return ""
@@ -43,9 +47,15 @@ def optimize_conformers(mol):
     if mmff_properties is not None:
         results = AllChem.MMFFOptimizeMoleculeConfs(mol, maxIters=1000, numThreads=0)
     else:
+        if not AllChem.UFFHasAllMoleculeParams(mol):
+            raise ValueError("Neither MMFF94 nor UFF has parameters for every atom in this molecule.")
         results = AllChem.UFFOptimizeMoleculeConfs(mol, maxIters=1000, numThreads=0)
 
-    return [energy for _, energy in results]
+    # RDKit returns a nonzero status when minimization fails or reaches maxIters.
+    # Keep positional alignment with the conformers, but never rank or export such
+    # candidates as minima (or accept a non-finite force-field energy).
+    return [energy if status == 0 and math.isfinite(energy) else None
+            for status, energy in results]
 
 def is_duplicate_conformer(energy, conf_id, kept, candidate_heavy_mol, kept_heavy_mol, energy_threshold, rms_threshold):
     # A candidate is a duplicate of an accepted conformer only when it is both close in energy and
@@ -94,6 +104,8 @@ def generate_unique_conformers(mol, num_confs, energy_threshold, rms_threshold, 
 
         num_accepted_this_round = 0
         for conformer, energy in zip(candidate_mol.GetConformers(), energies):
+            if energy is None:
+                continue
             conf_id = conformer.GetId()
             if is_duplicate_conformer(energy, conf_id, kept, candidate_heavy_mol, kept_heavy_mol, energy_threshold, rms_threshold):
                 num_discarded += 1
@@ -116,6 +128,20 @@ def generate_unique_conformers(mol, num_confs, energy_threshold, rms_threshold, 
 def on_generate_conformers(working_directory_path, input_smiles, charge, multiplicity, num_confs, energy_threshold, rms_threshold, file_name, file_type, progress=gr.Progress()):
     empty_dataframe = pd.DataFrame(columns=["ID", "Energy (kcal/mol)"])
     try:
+        if not working_directory_path or not Path(working_directory_path).is_dir():
+            raise ValueError("Please open a working directory first.")
+        if (not isinstance(file_name, str) or not file_name.strip()
+                or file_name in (".", "..") or "/" in file_name or "\\" in file_name):
+            raise ValueError("Use a file name without path separators.")
+        if file_type not in ("xyz", "pdb", "mol"):
+            raise ValueError("Choose xyz, pdb, or mol as the file type.")
+        directory = Path(working_directory_path).resolve()
+        # Check all destinations before generating or writing, including existing
+        # symlinks, so a typed prefix cannot overwrite a file outside this job.
+        for conformer_id in range(1, int(num_confs) + 1):
+            target = directory / f"{file_name}_{conformer_id}.{file_type}"
+            if target.resolve().parent != directory:
+                raise ValueError("The output file is outside the working directory.")
         mol = Chem.MolFromSmiles(input_smiles)
         if mol is None:
             raise ValueError(f'invalid SMILES "{input_smiles}"')
@@ -123,6 +149,8 @@ def on_generate_conformers(working_directory_path, input_smiles, charge, multipl
 
         # Generate conformers, removing the duplicates and replacing them by new ones
         unique_mol, conformers, num_discarded = generate_unique_conformers(mol, num_confs, energy_threshold, rms_threshold, progress)
+        if not conformers:
+            raise ValueError("No converged conformers could be generated. Check the molecule and try again.")
 
         conformer_rows = []
         for index, (energy, conf_id) in enumerate(progress.tqdm(conformers, total=len(conformers), desc="Writing")):
@@ -145,7 +173,7 @@ def on_generate_conformers(working_directory_path, input_smiles, charge, multipl
 
         status = f'{len(conformer_rows)} conformers generated, {num_discarded} duplicates discarded.'
         if len(conformer_rows) < num_confs:
-            status += f' The molecule has no more conformations that differ by at least {energy_threshold} kcal/mol and {rms_threshold} A RMSD, lower the thresholds to keep more.'
+            status += ' Fewer conformers were found within the sampling limit. Lower the thresholds to keep more.'
             return f"<span style='color:orange;'>{status}</span>", get_files_in_working_directory(working_directory_path), conformer_dataframe
         return f"<span style='color:green;'>{status}</span>", get_files_in_working_directory(working_directory_path), conformer_dataframe
     except Exception as exc:

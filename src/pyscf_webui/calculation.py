@@ -39,6 +39,7 @@ from .utils import (
     GRID_LEVELS,
     G_CONVERGENCES,
     JOB_SUFFIX,
+    RESULT_SUFFIX,
     J_COUPLING_NUCLEI_CHOICES,
     NMR,
     NMR_REQUIRES_GPU,
@@ -129,6 +130,7 @@ _LOG_TAIL_CHARS = 8000
 # as the ORCA app does. Two browser sessions working in two different directories can
 # then run at the same time, and Stop kills the right one.
 _processes: dict[str, subprocess.Popen] = {}
+_active_directories: set[str] = set()
 _stopped: set[str] = set()
 _lock = threading.Lock()
 
@@ -148,6 +150,37 @@ def _read_log_tail(log_path: str) -> str:
             return handle.read()
     except OSError:
         return ""
+
+
+def _working_file_path(directory: str, name: str) -> str:
+    """Keep calculation inputs and output names inside the selected directory."""
+    if not name or name in (".", "..") or any(c in name for c in ("/", "\\", "\0")):
+        raise ValueError("Use a file name without directory separators.")
+    path = os.path.join(directory, name)
+    if os.path.commonpath((directory, os.path.realpath(path))) != directory:
+        raise ValueError("Calculation files must stay inside the working directory.")
+    return path
+
+
+def _terminate_process_tree(process):
+    """Release native workers even if a streaming handler is closed unexpectedly."""
+    try:
+        parent = psutil.Process(process.pid)
+        targets = parent.children(recursive=True) + [parent]
+    except psutil.NoSuchProcess:
+        return
+    for target in targets:
+        try:
+            target.terminate()
+        except psutil.NoSuchProcess:
+            pass
+    _, alive = psutil.wait_procs(targets, timeout=5)
+    for target in alive:
+        try:
+            target.kill()
+        except psutil.NoSuchProcess:
+            pass
+    process.wait(timeout=5)
 
 
 def on_working_directory_file_list_change(working_directory_file_list):
@@ -315,12 +348,60 @@ def on_run_calculation(working_directory_path, structure_file_name, calculation_
         return
 
     job_name = job_name.strip()
+    # Resolve aliases before locking: ./data/job and its absolute path identify the
+    # same calculation, including when Stop is requested from another browser session.
+    working_directory_path = os.path.realpath(working_directory_path)
+    file_list = get_files_in_working_directory(working_directory_path)
+
+    # Reserve the directory BEFORE writing the job or rotating the log. A second Run
+    # used to overwrite an active job's files before discovering that it was busy.
+    # Keep the reservation through launch and streaming, and never yield with _lock held.
+    with _lock:
+        busy = working_directory_path in _active_directories
+        if not busy:
+            _active_directories.add(working_directory_path)
+            _stopped.discard(working_directory_path)
+    if busy:
+        yield (_status("A calculation is already running in this working directory.", "red"),
+               "", file_list)
+        return
+
+    try:
+        yield from _run_reserved_calculation(
+            working_directory_path, structure_file_name, calculation_type,
+            use_mm, force_field, max_iters,
+            method_type, functional, basis_set, reference, charge, multiplicity,
+            geom_maxiter, g_convergence, temperature, pressure, n_states, tda, root,
+            use_solvation, solvent_model, solvent, n_threads, memory_gb, use_gpu,
+            density_fit, dispersion, grid_level, scf_conv_tol,
+            compute_j_couplings, j_coupling_nuclei, job_name,
+        )
+    finally:
+        with _lock:
+            _active_directories.discard(working_directory_path)
+            _stopped.discard(working_directory_path)
+
+
+def _run_reserved_calculation(working_directory_path, structure_file_name, calculation_type,
+                             use_mm, force_field, max_iters,
+                             method_type, functional, basis_set, reference,
+                             charge, multiplicity,
+                             geom_maxiter, g_convergence, temperature, pressure,
+                             n_states, tda, root,
+                             use_solvation, solvent_model, solvent,
+                             n_threads, memory_gb, use_gpu,
+                             density_fit, dispersion, grid_level, scf_conv_tol,
+                             compute_j_couplings, j_coupling_nuclei, job_name):
+    """Run with exclusive ownership of this directory's calculation artifacts."""
     file_list = get_files_in_working_directory(working_directory_path)
 
     try:
         # Same loader the structure viewer uses, so the atom indices labelled on screen
         # are the ones PySCF receives.
-        structure_path = os.path.join(working_directory_path, structure_file_name)
+        structure_path = _working_file_path(working_directory_path, structure_file_name)
+        job_path = _working_file_path(working_directory_path, job_name + JOB_SUFFIX)
+        log_path = _working_file_path(working_directory_path, job_name + ".log")
+        result_path = _working_file_path(working_directory_path, job_name + RESULT_SUFFIX)
         mol = mol_from_structure_file(structure_path)
 
         if use_mm:
@@ -328,9 +409,16 @@ def on_run_calculation(working_directory_path, structure_file_name, calculation_
             # embedding costs optimizer steps, and MMFF removes most of that strain for
             # a fraction of a second of work.
             if force_field == "MMFF":
-                AllChem.MMFFOptimizeMolecule(mol, maxIters=int(max_iters))
+                if not AllChem.MMFFHasAllMoleculeParams(mol):
+                    raise ValueError("MMFF has no parameters for some atoms. Try UFF or disable pre-optimization.")
+                mm_status = AllChem.MMFFOptimizeMolecule(mol, maxIters=int(max_iters))
             else:
-                AllChem.UFFOptimizeMolecule(mol, maxIters=int(max_iters))
+                if not AllChem.UFFHasAllMoleculeParams(mol):
+                    raise ValueError("UFF has no parameters for some atoms. Disable pre-optimization.")
+                mm_status = AllChem.UFFOptimizeMolecule(mol, maxIters=int(max_iters))
+            if mm_status != 0:
+                raise ValueError("Molecular-mechanics pre-optimization did not converge. "
+                                 "Increase its iteration limit or disable pre-optimization.")
 
         spec = build_job_spec(
             calculation_type=calculation_type,
@@ -367,8 +455,12 @@ def on_run_calculation(working_directory_path, structure_file_name, calculation_
             j_coupling_nuclei=j_coupling_nuclei,
         )
 
-        job_path = os.path.join(working_directory_path, job_name + JOB_SUFFIX)
-        log_path = os.path.join(working_directory_path, job_name + ".log")
+        with _lock:
+            cancelled = working_directory_path in _stopped
+        if cancelled:
+            yield _status("Calculation stopped before launch.", "red"), "", file_list
+            return
+
         write_json(job_path, spec)
 
         # Opening the log below truncates it, so preserve a previous run's output first:
@@ -378,16 +470,14 @@ def on_run_calculation(working_directory_path, structure_file_name, calculation_
         if os.path.isfile(log_path):
             os.replace(log_path, log_path + ".bak")
             backed_up = True
+        # A killed child cannot write its failure result. Archive the old result now
+        # so Stop or a CUDA crash cannot leave a previous run looking like this run's
+        # successful output. Keep the previous result available alongside the log backup.
+        if os.path.isfile(result_path):
+            os.replace(result_path, result_path + ".bak")
     except Exception as exc:
         yield _status(f"Could not start the calculation: {exc}", "red"), "", file_list
         return
-
-    with _lock:
-        existing = _processes.get(working_directory_path)
-        if existing is not None and existing.poll() is None:
-            yield (_status("A calculation is already running in this working directory.", "red"),
-                   "", file_list)
-            return
 
     # PySCF writes no output file of its own -- it prints to a stream -- so the log *is*
     # the child's stdout. Pointing both streams at <name>.log captures all three writers
@@ -398,21 +488,25 @@ def on_run_calculation(working_directory_path, structure_file_name, calculation_
     started = time.time()
     try:
         with open(log_path, "w", encoding="utf-8") as log_file:
-            process = subprocess.Popen(
-                # -u so the log is unbuffered and the tail below is genuinely live; a
-                # buffered child would show nothing until it exited.
-                # The job path must be absolute: working directories are named relatively
-                # ("./data/wd"), and the child is started *in* that directory, so a
-                # relative path would be resolved a second time against itself.
-                [sys.executable, "-u", "-m", "pyscf_webui.runner", "run",
-                 os.path.abspath(job_path)],
-                cwd=working_directory_path,
-                stdout=log_file,
-                stderr=subprocess.STDOUT,
-            )
+            # Register atomically with launch so Stop cannot fall into a gap after
+            # preparation but before the new process is visible in the registry.
             with _lock:
-                _processes[working_directory_path] = process
-                _stopped.discard(working_directory_path)
+                cancelled = working_directory_path in _stopped
+                if not cancelled:
+                    process = subprocess.Popen(
+                        # -u keeps the log live. The job path must be absolute because
+                        # the child starts inside the working directory itself.
+                        [sys.executable, "-u", "-m", "pyscf_webui.runner", "run",
+                         os.path.abspath(job_path)],
+                        cwd=working_directory_path,
+                        stdout=log_file,
+                        stderr=subprocess.STDOUT,
+                    )
+                    _processes[working_directory_path] = process
+            if cancelled:
+                yield (_status("Calculation stopped before launch.", "red"), "",
+                       get_files_in_working_directory(working_directory_path))
+                return
 
             try:
                 while process.poll() is None:
@@ -423,10 +517,14 @@ def on_run_calculation(working_directory_path, structure_file_name, calculation_
                     time.sleep(_POLL_INTERVAL)
                 return_code = process.returncode
             finally:
-                with _lock:
-                    _processes.pop(working_directory_path, None)
-                    stopped = working_directory_path in _stopped
-                    _stopped.discard(working_directory_path)
+                try:
+                    if process.poll() is None:
+                        _terminate_process_tree(process)
+                finally:
+                    with _lock:
+                        _processes.pop(working_directory_path, None)
+                        stopped = working_directory_path in _stopped
+                        _stopped.discard(working_directory_path)
     except Exception as exc:
         yield _status(f"Error running calculation: {exc}", "red"), "", get_files_in_working_directory(working_directory_path)
         return
@@ -463,30 +561,24 @@ def on_stop_calculation(working_directory_path):
     reports the outcome once ``poll()`` returns, so this only needs to acknowledge the
     request.
     """
+    if not working_directory_path:
+        gr.Warning("No calculation is running.")
+        return ""
+    working_directory_path = os.path.realpath(working_directory_path)
     with _lock:
         process = _processes.get(working_directory_path)
+        if process is None and working_directory_path in _active_directories:
+            _stopped.add(working_directory_path)
+            return _status("Stopping calculation preparation...", "red")
         if process is None or process.poll() is not None:
             gr.Warning("No calculation is running.")
             return ""
         _stopped.add(working_directory_path)
 
     try:
-        parent = psutil.Process(process.pid)
-        targets = parent.children(recursive=True) + [parent]
-    except psutil.NoSuchProcess:
-        targets = []
-
-    for target in targets:
-        try:
-            target.terminate()
-        except psutil.NoSuchProcess:
-            pass
-    _, alive = psutil.wait_procs(targets, timeout=5)
-    for target in alive:
-        try:
-            target.kill()
-        except psutil.NoSuchProcess:
-            pass
+        _terminate_process_tree(process)
+    except (psutil.Error, OSError, subprocess.SubprocessError) as exc:
+        return _status(f"Could not stop the calculation: {exc}", "red")
 
     return _status("Stopping calculation...", "red")
 
@@ -647,7 +739,8 @@ def calculation_tab_content(working_directory_path_state, working_directory_file
                          density_fit_checkbox, dispersion_dropdown, grid_level_dropdown,
                          scf_conv_tol_dropdown, j_coupling_checkbox, j_nuclei_dropdown,
                          job_name_textbox],
-                        [status_markdown, live_output_textarea, working_directory_file_list_state]) \
+                        [status_markdown, live_output_textarea, working_directory_file_list_state],
+                        concurrency_limit=None) \
                   .then(on_calculation_finished, None, run_button)
         # concurrency_limit=None: without it this event would queue behind the running
         # calculation it is meant to interrupt, and only fire once PySCF had finished.

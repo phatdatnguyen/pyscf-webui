@@ -2,13 +2,14 @@
 
 nglview is a Jupyter widget, so it cannot be embedded in a Gradio page directly. Both
 viewers therefore take the same route: build the widget, write it to a standalone HTML
-file under ``static/``, and return an ``<iframe>`` pointing at it. The iframe URL carries
-a timestamp because the browser would otherwise serve the previous render from cache --
-the file name never changes.
+file under ``static/``, and return an ``<iframe>`` pointing at it. Each render gets its
+own URL so another browser session cannot overwrite a view before its iframe loads.
 """
 import contextlib
 import os
+import threading
 import time
+import uuid
 
 import nglview
 
@@ -17,6 +18,7 @@ from .utils import mol_from_symbols_and_coords
 # Where the generated viewer HTML goes. Relative to the process working directory, which
 # is what app.py mounts at /static.
 _STATIC_DIR = os.path.join(".", "static")
+_WIDGET_LOCK = threading.RLock()
 
 # The non-orbital selections the viewer understands. Defined here rather than in the
 # Result tab because this module owns both halves of the mapping: which cubegen task a
@@ -83,27 +85,30 @@ def _transient_widgets():
     The registry is a private ipywidgets detail, so a version that moves it degrades to
     the old accumulating behaviour rather than breaking the viewer.
     """
-    try:
-        from ipywidgets.widgets import widget as widget_module
-        registry = widget_module._instances
-    except Exception:  # pragma: no cover - depends on the ipywidgets version
-        registry = None
+    # The registry is process-global. Two concurrent renders must not serialize or
+    # unregister each other's widgets, even when they write separate HTML files.
+    with _WIDGET_LOCK:
+        try:
+            from ipywidgets.widgets import widget as widget_module
+            registry = widget_module._instances
+        except Exception:  # pragma: no cover - depends on the ipywidgets version
+            registry = None
 
-    before = set(registry) if registry is not None else set()
-    try:
-        yield
-    finally:
-        if registry is not None:
-            for key in set(registry) - before:
-                registry.pop(key, None)
+        before = set(registry) if registry is not None else set()
+        try:
+            yield
+        finally:
+            if registry is not None:
+                for key in set(registry) - before:
+                    registry.pop(key, None)
 
 
 def _write_view(view, relative_path: str) -> str:
     """Write ``view`` to ``static/<relative_path>`` and return the iframe HTML."""
+    stem, extension = os.path.splitext(relative_path)
+    relative_path = f"{stem}-{uuid.uuid4().hex}{extension}"
     output_path = os.path.join(_STATIC_DIR, relative_path)
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    if os.path.exists(output_path):
-        os.remove(output_path)
     nglview.write_html(output_path, [view])
     return _iframe("/static/" + relative_path.replace(os.sep, "/"))
 
