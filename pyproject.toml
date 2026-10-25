@@ -20,9 +20,7 @@ dependencies = [
     "h5py",
     "numpy",
     "scipy",
-    # Blocks(css_paths=...) and Dataframe row_count tuples use the Gradio 5 API.
-    # Gradio 6 removes these; keep fresh installs on the supported major version.
-    "gradio>=5.0,<6.0",
+    "gradio>=6.30.0,<7",
     "fastapi",
     "uvicorn",
     "rdkit",
@@ -51,20 +49,15 @@ gpu = [
 ]
 dev = ["pytest", "ruff"]
 
-# The 2D sketcher in the Conformer tab is optional and CANNOT be listed above:
-# gradio_molecule2d 0.0.3 pins gradio<5 while this app needs gradio>=5, so pip would
-# downgrade Gradio and break the UI. Install it separately with:
-#     pip install --no-deps gradio_molecule2d
-# The import is guarded in conformer_generation.py, so the app runs fine without it.
-
 [project.scripts]
 pyscf-webui = "pyscf_webui.app:main"
+pyscf-webui-install-editor = "pyscf_webui.install_molecular_editor:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-pyscf_webui = ["styles.css"]
+pyscf_webui = ["styles.css", "frontend/*.js"]
 
 [tool.ruff]
 line-length = 100

@@ -22,8 +22,16 @@ something is the way it is; that history is deliberate, not stale.
 
 A pip-installable package (import name `pyscf_webui`) using a **src layout**: all modules
 live under `src/pyscf_webui/`. Metadata is in `pyproject.toml` (setuptools backend);
-`styles.css` ships as package data. The `pyscf-webui` console command maps to
+`styles.css` and `frontend/*.js` ship as package data. The `pyscf-webui` console command maps to
 `pyscf_webui.app:main`, which serves on the first free port at/after 7860.
+
+The UI targets Gradio 6.30+ within the 6.x series. CSS is passed to `mount_gradio_app`,
+not `Blocks`. The repository-owned molecular editor uses `gr.HTML` with a JavaScript
+bridge to a locally served Ketcher standalone bundle. `pyscf-webui-install-editor`
+downloads and verifies the pinned bundle in the user's data directory (overridable with
+`PYSCF_WEBUI_EDITOR_DIR`); it is not committed or included in the Python wheel. Permanent
+editor assets mount at `/molecule-editor` before Gradio's `/` mount, independently of the
+transient `/static` viewers. Starting the app never downloads assets.
 
 `gpu4pyscf` is an optional extra, not a hard dependency — the CUDA-12 wheels would make
 the package uninstallable on a machine without one. Everything except GPU acceleration
@@ -34,7 +42,7 @@ works without it.
 ```bash
 python3 -m venv pyscf-env && source pyscf-env/bin/activate
 pip install -e ".[dev]"          # add ".[gpu]" for gpu4pyscf + the CUDA runtime wheels
-pip install --no-deps gradio_molecule2d   # optional 2D sketcher; it pins gradio<5
+pyscf-webui-install-editor       # one-time download; drawing then works offline
 
 pyscf-webui                      # or: python -m pyscf_webui.app
 
@@ -174,6 +182,9 @@ left column. State flows through `gr.State` objects created in `working_director
 
 - `conformer_generation.py` — SMILES or sketch → RDKit oversampled embedding → MMFF/UFF
   minimize → dedupe by energy **and** RMSD. Engine-agnostic; untouched by the PySCF port.
+- `molecular_editor.py` / `frontend/molecular_editor.js` — the Ketcher iframe and explicit
+  SMILES load/export events. RDKit validates both directions; loading SMILES must preserve
+  the iframe and undo history. `install_molecular_editor.py` owns bundle provenance and installation.
 - `calculation.py` — structure + method + type → job spec → run the child, streaming its
   log. Holds the process registry and the profile-driven menu handler.
 - `result.py` — loads a result file and conditionally reveals accordions based on what the

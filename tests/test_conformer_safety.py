@@ -44,7 +44,7 @@ def test_generation_requires_open_directory():
 
 
 def test_empty_sketch_clears_smiles():
-    assert conformers.on_draw_molecule(None) == ""
+    assert conformers.on_smiles_from_editor({"smiles": "", "load_id": None}) == ""
 
 
 def test_only_converged_finite_energies_are_accepted(monkeypatch):

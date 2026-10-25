@@ -61,18 +61,29 @@ pyscf-env\Scripts\activate.bat
 Then install the package:
 
 ```
-pip install -e .
+pip install --upgrade -e .
+pyscf-webui-install-editor
 ```
 
 This pulls in PySCF, geomeTRIC and `pyscf-properties` (the last is needed for NMR
 J-couplings). It does **not** pull in GPU support — see below.
 
-The 2D sketcher in the Conformer tab is optional and must be installed separately,
-because it pins an incompatible Gradio version:
+The UI uses Gradio 6.30 or newer within the 6.x series. Its molecular editor is a
+repository-owned Gradio HTML component backed by [Ketcher](https://github.com/epam/ketcher).
+The installer downloads and verifies the pinned Ketcher 3.18.0 standalone bundle, including
+its license notices. After this one-time download, drawing works offline with no Node build,
+CDN, or separate chemistry service. SMILES input also works without the drawing assets.
 
-```
-pip install --no-deps gradio_molecule2d
-```
+In the Conformer tab, use **Load SMILES into editor** to draw the current SMILES, and
+**Use drawing** to send the edited molecule back to the SMILES field before generating
+conformers. Invalid input leaves the previous molecule unchanged.
+
+Editor assets live in the user's data directory, independently of the package and working
+directory: `~/.local/share/pyscf-webui/ketcher/3.18.0` on Linux (or under `XDG_DATA_HOME`),
+`~/Library/Application Support/pyscf-webui/ketcher/3.18.0` on macOS, and
+`%LOCALAPPDATA%\\pyscf-webui\\ketcher\\3.18.0` on Windows. To use another location, set
+`PYSCF_WEBUI_EDITOR_DIR` before running both the installer and the app. Re-running the
+installer verifies an existing bundle; it never overwrites a changed installation.
 
 ### GPU support (optional)
 
@@ -174,3 +185,14 @@ pytest
 
 Tests that need PySCF or a GPU skip themselves when it is missing, so the suite runs in a
 bare checkout.
+
+To exercise the drawing editor in a real browser after installing its assets:
+
+```bash
+pip install playwright
+playwright install chromium
+python tests/browser/molecular_editor_smoke.py
+```
+
+This check blocks external browser requests and tests SMILES load/export, stereochemistry,
+clearing, and conformer generation. Pass `--prefix /lab/pyscf` to also test a URL prefix.

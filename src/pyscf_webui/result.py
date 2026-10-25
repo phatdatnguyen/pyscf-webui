@@ -757,7 +757,7 @@ def result_tab_content(working_directory_path_state, working_directory_file_list
                                                     info="Smaller is smoother but slower and much larger on disk.")
                     visualize_button = gr.Button("Visualize", variant="primary")
                 with gr.Column(scale=2):
-                    visualization_html = gr.HTML()
+                    visualization_html = gr.HTML(padding=True)
 
     _result_outputs = [
         status_markdown, result_state,

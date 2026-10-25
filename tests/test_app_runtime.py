@@ -18,7 +18,13 @@ def test_custom_run_directory_configures_files_and_viewers(tmp_path, monkeypatch
     monkeypatch.setattr(app, "calculation_tab_content", lambda *args: None)
     monkeypatch.setattr(app, "conformer_generation_tab_content", lambda *args: None)
     monkeypatch.setattr(app, "result_tab_content", lambda *args: None)
-    monkeypatch.setattr(app.gr, "mount_gradio_app", lambda host, blocks, path: host)
+    mounted_options = {}
+
+    def mount_gradio(host, blocks, **options):
+        mounted_options.update(options)
+        return host
+
+    monkeypatch.setattr(app.gr, "mount_gradio_app", mount_gradio)
     monkeypatch.setattr(visualization, "_STATIC_DIR", visualization._STATIC_DIR)
     run_dir = tmp_path / "separate-run-dir"
     host = app.build_app(run_dir)
@@ -28,6 +34,46 @@ def test_custom_run_directory_configures_files_and_viewers(tmp_path, monkeypatch
     assert Path(static_route.app.directory) == run_dir / "static"
     assert Path(visualization._STATIC_DIR) == run_dir / "static"
     assert (run_dir / "data").is_dir()
+    assert mounted_options == {"path": "/", "css_paths": app._STYLES_PATH}
+
+
+def test_gradio_mount_serves_styles_editor_and_transient_views(tmp_path, monkeypatch):
+    """Exercise the real mounted app: Gradio 6 owns CSS at mount time, not Blocks."""
+    import asyncio
+    import httpx
+    from pyscf_webui import molecular_editor
+
+    editor_dir = tmp_path / "installed-editor"
+    editor_dir.mkdir()
+    (editor_dir / "index.html").write_text("<html><body>Molecular editor</body></html>")
+    (editor_dir / "editor.js").write_text("window.editorLoaded = true;")
+    monkeypatch.setattr(molecular_editor, "KETCHER_DIR", editor_dir)
+    monkeypatch.setattr(visualization, "_STATIC_DIR", visualization._STATIC_DIR)
+    monkeypatch.setenv("GRADIO_ANALYTICS_ENABLED", "False")
+    run_dir = tmp_path / "run"
+
+    host = app.build_app(run_dir)
+
+    async def check_routes():
+        async with host.router.lifespan_context(host):
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=host),
+                                         base_url="http://testserver") as client:
+                assert (await client.get("/")).status_code == 200
+                config_response = await client.get("/config")
+                assert config_response.status_code == 200
+                config = config_response.json()
+                assert app._STYLES_PATH.read_text() in config["css"]
+                assert any(component["props"].get("elem_id") == "molecular-editor"
+                           for component in config["components"])
+                editor = await client.get("/molecule-editor/")
+                assert editor.text == (editor_dir / "index.html").read_text()
+                script = await client.get("/molecule-editor/editor.js")
+                assert script.text == "window.editorLoaded = true;"
+                (run_dir / "static" / "view.html").write_text("<html>Structure view</html>")
+                viewer = await client.get("/static/view.html")
+                assert viewer.text == "<html>Structure view</html>"
+
+    asyncio.run(check_routes())
 
 
 def test_port_search_stops_at_last_tcp_port(monkeypatch):

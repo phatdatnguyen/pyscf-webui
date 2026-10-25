@@ -301,7 +301,7 @@ def working_directory_blocks(base_path="./data/"):
             delete_file_button = gr.Button(value="Delete Selected File", interactive=False)
             clean_working_directory_button = gr.Button(value="Clean Working Directory", interactive=False)
         view_structure_button = gr.Button(value="View Structure File", interactive=False)
-        structure_viewer_html = gr.HTML()
+        structure_viewer_html = gr.HTML(padding=True)
         view_text_file_button = gr.Button(value="View Text File", interactive=False)
         text_file_viewer_textarea = gr.TextArea(label="Text File Viewer", lines=20, elem_id="textfile_viewer", interactive=False)
         save_text_file_button = gr.Button(value="Save Text File", interactive=False)
