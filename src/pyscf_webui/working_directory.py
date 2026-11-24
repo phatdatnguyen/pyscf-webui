@@ -245,7 +245,7 @@ def on_view_text_file(working_directory_path, text_file_name):
     """
     try:
         text_file_path = _file_path(working_directory_path, text_file_name)
-        with open(text_file_path, 'r') as file:
+        with open(text_file_path, 'r', encoding="utf-8") as file:
             content = file.read()
         return (gr.update(label=f"Text File Viewer - {text_file_name}", value=content, interactive=True),
                 gr.update(interactive=True), str(text_file_path))
@@ -269,7 +269,7 @@ def on_save_text_file(working_directory_path, loaded_text_file_path, text_conten
             raise ValueError("The loaded file belongs to a different working directory. Load it again.")
         if not text_file_path.is_file():
             raise ValueError("The loaded file no longer exists.")
-        with open(text_file_path, 'w') as file:
+        with open(text_file_path, 'w', encoding="utf-8") as file:
             file.write(text_content)
         status = "File saved successfully."
     except Exception as exc:

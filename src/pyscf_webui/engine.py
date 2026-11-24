@@ -12,6 +12,7 @@ the runner knows about the job/result file contract.
 from __future__ import annotations
 
 import os
+import sys
 from typing import Any
 
 # Hartree-based conversions, duplicated from pyscf.data.nist so that the pure helpers here
@@ -68,6 +69,67 @@ def split_dispersion(functional: str) -> tuple[str, str | None]:
         if upper.endswith(suffix):
             return functional[: -len(suffix)], suffix[1:].lower()
     return functional, None
+
+
+def dispersion_settings(spec: dict[str, Any]) -> tuple[str | None, str | None]:
+    """Resolve the explicit dispersion control and legacy functional suffix together."""
+    from .utils import method_uses_functional
+
+    method_type = spec.get("method_type")
+    if method_uses_functional(method_type):
+        xc, suffix = split_dispersion(spec.get("functional") or "B3LYP")
+    else:
+        xc, suffix = None, None
+    selected = spec.get("dispersion") or None
+    if selected is not None:
+        if not isinstance(selected, str):
+            raise ValueError("Dispersion correction must be a named option or None.")
+        selected = selected.strip().lower() or None
+    if selected and suffix and selected != suffix:
+        raise ValueError(
+            f"Dispersion correction {selected!r} conflicts with the functional's "
+            f"{suffix!r} suffix. Choose matching settings or remove the suffix."
+        )
+    dispersion = selected or suffix
+    if dispersion and dispersion not in ("d3bj", "d3zero", "d4"):
+        raise ValueError(
+            f"Unsupported dispersion correction {dispersion!r}. Choose D3(BJ), "
+            "D3(zero), D4, or None."
+        )
+    if dispersion and method_type != "HF" and not method_uses_functional(method_type):
+        # PySCF would parameterize the correction for the HF reference, not the
+        # correlated method whose energy is reported. Do not silently mix the two.
+        raise ValueError(
+            f"Empirical dispersion is not supported for {method_type} calculations. "
+            "Select None for Dispersion correction."
+        )
+    return xc, dispersion
+
+
+def _require_dispersion_backend(dispersion: str) -> None:
+    """Fail before SCF if the requested PySCF dispersion extension cannot be loaded."""
+    try:
+        # PySCF's energy, gradient and Hessian hooks consume THIS namespace. The
+        # separate dftd3/dftd4 distributions are not drop-in replacements for it.
+        from pyscf.dispersion import dftd3, dftd4  # noqa: F401
+    except (ImportError, OSError) as exc:
+        if sys.platform == "win32":
+            remedy = (
+                "Native Windows installations do not include pyscf-dispersion. "
+                "Run the app in WSL2/Linux for dispersion-corrected calculations, "
+                "or select None for Dispersion correction and remove any dispersion "
+                "suffix from the functional."
+            )
+        else:
+            remedy = (
+                "Install or repair it with `python -m pip install --upgrade "
+                "pyscf-dispersion`, or select None for Dispersion correction and "
+                "remove any dispersion suffix from the functional."
+            )
+        raise RuntimeError(
+            f"The requested {dispersion.upper()} correction requires a working "
+            f"pyscf-dispersion backend. {remedy}"
+        ) from exc
 
 
 def to_numpy(array):
@@ -171,6 +233,9 @@ def build_scf(spec: dict[str, Any], mol, use_gpu: bool):
     # Only DFT-family jobs consume a functional. MP2/CCSD/CCSD(T) are built on an HF
     # reference; TD-DFT and the excited-state optimization are built on a KS reference.
     scf_is_dft = method_uses_functional(method_type)
+    xc, dispersion = dispersion_settings(spec)
+    if dispersion:
+        _require_dispersion_backend(dispersion)
 
     if use_gpu:
         from gpu4pyscf import dft as dft_module, scf as scf_module
@@ -187,11 +252,12 @@ def build_scf(spec: dict[str, Any], mol, use_gpu: bool):
     mf = classes[reference](mol)
 
     if scf_is_dft:
-        xc, dispersion = split_dispersion(spec.get("functional") or "B3LYP")
         mf.xc = xc
-        if dispersion:
-            mf.disp = dispersion
         mf.grids.level = int(spec.get("grid_level", 3))
+    if dispersion:
+        # The UI stores this separately from the functional. Reading only a suffix
+        # would silently ignore every correction selected in the dropdown.
+        mf.disp = dispersion
 
     # Density fitting is the default for DFT (as it was in the Psi4 version, via
     # SCF_TYPE=DF) and is much of what makes the GPU path worth having; the conventional

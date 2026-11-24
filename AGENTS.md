@@ -34,8 +34,11 @@ editor assets mount at `/molecule-editor` before Gradio's `/` mount, independent
 transient `/static` viewers. Starting the app never downloads assets.
 
 `gpu4pyscf` is an optional extra, not a hard dependency — the CUDA-12 wheels would make
-the package uninstallable on a machine without one. Everything except GPU acceleration
-works without it.
+the package uninstallable on unsupported platforms. The GPU extra targets Linux/WSL2.
+Native Windows x64 uses PySCF >=2.15.1 and omits `pyscf-dispersion`, which has no Windows
+distribution. CPU calculations and the UI work without it; requested D3/D4 corrections
+must fail clearly when that backend is absent, never run silently without the correction.
+NMR shielding and IR intensities retain their GPU requirements.
 
 ## Commands
 

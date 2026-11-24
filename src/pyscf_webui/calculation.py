@@ -501,6 +501,10 @@ def _run_reserved_calculation(working_directory_path, structure_file_name, calcu
                         cwd=working_directory_path,
                         stdout=log_file,
                         stderr=subprocess.STDOUT,
+                        # Redirecting a file descriptor does not inherit log_file's
+                        # encoding. Windows would otherwise use its legacy code page
+                        # for Unicode paths/messages while the UI reads the log as UTF-8.
+                        env=dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8"),
                     )
                     _processes[working_directory_path] = process
             if cancelled:
@@ -604,6 +608,11 @@ def calculation_tab_content(working_directory_path_state, working_directory_file
                           if GPU_AVAILABLE else
                           "No usable gpu4pyscf installation was found; running on the CPU. "
                           "See the README for the CUDA runtime requirement."))
+            if sys.platform == "win32":
+                gr.Markdown(
+                    "Standard Windows packages support **CPU calculations**. "
+                    "Use Linux/WSL2 for GPU acceleration and D3/D4 dispersion."
+                )
         with gr.Accordion("Calculation"):
             with gr.Row():
                 with gr.Column(scale=1):

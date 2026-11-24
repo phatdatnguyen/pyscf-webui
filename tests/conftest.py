@@ -11,6 +11,7 @@ fault would take the whole run down rather than skipping a few tests.
 """
 import subprocess
 import sys
+import errno
 
 import pytest
 
@@ -28,6 +29,22 @@ GPU_AVAILABLE = _module_importable("gpu4pyscf.dft")
 
 needs_pyscf = pytest.mark.skipif(not PYSCF_AVAILABLE, reason="pyscf is not installed")
 needs_gpu = pytest.mark.skipif(not GPU_AVAILABLE, reason="gpu4pyscf is not usable here")
+
+
+@pytest.fixture
+def symlink_or_skip():
+    """Run link-safety tests when the account/filesystem can actually create links."""
+    def create(link, target, **kwargs):
+        try:
+            link.symlink_to(target, **kwargs)
+        except OSError as exc:
+            # Windows needs Developer Mode or elevated symlink privileges. Probe the
+            # operation itself so capable Windows installations still run these tests.
+            if (getattr(exc, "winerror", None) == 1314
+                    or exc.errno in (errno.EPERM, errno.EACCES, errno.ENOTSUP)):
+                pytest.skip(f"Symlinks are unavailable for this account/filesystem: {exc}")
+            raise
+    return create
 
 
 @pytest.fixture

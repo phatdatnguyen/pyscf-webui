@@ -46,27 +46,43 @@ in one folder you can come back to.
 
 ***For Linux and macOS***
 
-```
+```bash
 python3 -m venv pyscf-env
 source pyscf-env/bin/activate
-```
-
-***For Windows***
-
-```
-python -m venv pyscf-env
-pyscf-env\Scripts\activate.bat
-```
-
-Then install the package:
-
-```
-pip install --upgrade -e .
+python -m pip install --upgrade pip
+python -m pip install --upgrade -e .
 pyscf-webui-install-editor
 ```
 
+***For native Windows (64-bit, CPU calculations)***
+
+Use 64-bit Python 3.12. Native Windows wheels are available starting with
+[PySCF 2.15](https://pyscf.org/user/install.html); this app requires 2.15.1 or newer on
+Windows. The `pyscf-dispersion` extension has no Windows distribution, so the Windows
+installation omits it. Ordinary CPU calculations do not need that extension.
+
+Run these commands in PowerShell from your checkout. Using the virtual environment's
+executables directly avoids PowerShell activation-policy issues:
+
+```powershell
+cd D:\Github\pyscf-webui
+py -3.12 -m venv pyscf-env
+.\pyscf-env\Scripts\python.exe -m pip install --upgrade pip
+.\pyscf-env\Scripts\python.exe -m pip install --upgrade -e .
+.\pyscf-env\Scripts\pyscf-webui-install-editor.exe
+.\pyscf-env\Scripts\pyscf-webui.exe
+```
+
+Native Windows supports the molecular editor, conformers, CPU calculations, and result
+viewers. Leave **Dispersion correction** empty: requested D3/D4 corrections require the
+unavailable extension and are rejected explicitly. GPU acceleration, GPU IR intensities,
+and NMR shielding require the Linux stack; use WSL2 for those features. Do not install the
+`[gpu]` extra in native Windows Python.
+
 This pulls in PySCF, geomeTRIC and `pyscf-properties` (the last is needed for NMR
 J-couplings). It does **not** pull in GPU support — see below.
+
+### Molecular editor
 
 The UI uses Gradio 6.30 or newer within the 6.x series. Its molecular editor is a
 repository-owned Gradio HTML component backed by [Ketcher](https://github.com/epam/ketcher).
@@ -87,6 +103,9 @@ installer verifies an existing bundle; it never overwrites a changed installatio
 
 ### GPU support (optional)
 
+The CUDA GPU extra targets Linux, including Ubuntu under WSL2 on Windows. The published
+[gpu4pyscf wheels](https://pypi.org/project/gpu4pyscf-cuda12x/) do not include native Windows.
+
 ```
 pip install -e ".[gpu]"
 ```
@@ -104,6 +123,24 @@ guess. A system CUDA toolkit does not substitute unless it is CUDA 12.
 
 The app checks for a usable GPU at startup, in a subprocess, and simply disables the
 "Use GPU" checkbox if there is not one — it runs on CPU either way.
+
+On Windows, first [install WSL2](https://learn.microsoft.com/en-us/windows/wsl/install)
+and a [Windows NVIDIA driver with WSL CUDA support](https://developer.nvidia.com/cuda/wsl).
+Then, in the Ubuntu terminal, use a separate Linux virtual environment:
+
+```bash
+cd /mnt/d/Github/pyscf-webui
+python3 -m venv ~/.venvs/pyscf-webui
+source ~/.venvs/pyscf-webui/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e ".[gpu]"
+pyscf-webui-install-editor
+pyscf-webui
+```
+
+If Ubuntu reports that `venv` is unavailable, install its `python3-venv` package first.
+Windows and WSL must use separate virtual environments. Open the address printed by the
+app in your Windows browser.
 
 ## Start the web UI
 

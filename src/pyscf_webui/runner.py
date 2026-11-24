@@ -277,14 +277,14 @@ def run_job(job_path: str) -> int:
         result["device"] = device
         _print_header(spec, device)
 
-        mol = engine.build_mol(spec, verbose=int(spec.get("verbose", 4)))
-        mf = engine.build_scf(spec, mol, use_gpu)
-
-        xc_used, dispersion_used = engine.split_dispersion(spec.get("functional") or "")
+        xc_used, dispersion_used = engine.dispersion_settings(spec)
         uses_functional = method_uses_functional(spec.get("method_type"))
         result["xc"] = xc_used if uses_functional else None
         result["dispersion"] = dispersion_used
         result["density_fit"] = bool(spec.get("density_fit", uses_functional))
+
+        mol = engine.build_mol(spec, verbose=int(spec.get("verbose", 4)))
+        mf = engine.build_scf(spec, mol, use_gpu)
 
         td = None
         if calculation_type == GEOMETRY_OPTIMIZATION:

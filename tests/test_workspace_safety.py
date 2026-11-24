@@ -91,12 +91,12 @@ def test_directory_name_cannot_escape_data(tmp_path, name):
     assert not data.exists()
 
 
-def test_directory_symlink_cannot_escape_data(tmp_path):
+def test_directory_symlink_cannot_escape_data(tmp_path, symlink_or_skip):
     data = tmp_path / "data"
     data.mkdir()
     outside = tmp_path / "outside"
     outside.mkdir()
-    (data / "escape").symlink_to(outside, target_is_directory=True)
+    symlink_or_skip(data / "escape", outside, target_is_directory=True)
     assert wd.get_working_directories(data) == []
     updates = wd.on_open_working_directory("escape", data)
     assert all(update == gr.update() for update in updates)
@@ -120,7 +120,7 @@ def test_delete_cannot_escape_selected_directory(tmp_path):
     assert outside.read_text() == "keep me"
 
 
-def test_upload_does_not_follow_symlink_outside_directory(tmp_path):
+def test_upload_does_not_follow_symlink_outside_directory(tmp_path, symlink_or_skip):
     source = tmp_path / "source" / "input.xyz"
     source.parent.mkdir()
     source.write_text("uploaded")
@@ -128,7 +128,7 @@ def test_upload_does_not_follow_symlink_outside_directory(tmp_path):
     working.mkdir()
     outside = tmp_path / "outside.txt"
     outside.write_text("keep me")
-    (working / source.name).symlink_to(outside)
+    symlink_or_skip(working / source.name, outside)
     wd.on_upload_file(str(working), str(source))
     assert outside.read_text() == "keep me"
 

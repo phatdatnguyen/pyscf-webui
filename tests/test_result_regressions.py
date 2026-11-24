@@ -200,12 +200,12 @@ def test_csv_export_names_cannot_escape_working_directory(tmp_path, name):
     assert list(tmp_path.iterdir()) == []
 
 
-def test_csv_export_does_not_follow_a_symlink_outside_the_directory(tmp_path):
+def test_csv_export_does_not_follow_a_symlink_outside_the_directory(tmp_path, symlink_or_skip):
     workdir = tmp_path / "work"
     workdir.mkdir()
     target = tmp_path / "outside.csv"
     target.write_text("preserve this file")
-    (workdir / "data.csv").symlink_to(target)
+    symlink_or_skip(workdir / "data.csv", target)
     status, _ = result.on_export_data(str(workdir), "data", pd.DataFrame({"energy": [-76.4]}))
     assert "red" in status
     assert target.read_text() == "preserve this file"

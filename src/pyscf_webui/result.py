@@ -619,7 +619,8 @@ def on_visualize(working_directory_path, result_file_name, result, selection,
         completed = subprocess.run(
             [sys.executable, "-u", "-m", "pyscf_webui.runner", "cubegen",
              os.path.abspath(spec_path)],
-            cwd=working_directory_path, capture_output=True, text=True,
+            cwd=working_directory_path, capture_output=True, encoding="utf-8", errors="replace",
+            env=dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8"),
         )
         if completed.returncode != 0:
             detail = (completed.stdout + completed.stderr)[-2000:]

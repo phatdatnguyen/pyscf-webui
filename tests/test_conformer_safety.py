@@ -24,12 +24,12 @@ def test_conformer_prefix_cannot_escape_working_directory(tmp_path, monkeypatch,
     assert table.empty
 
 
-def test_conformer_output_does_not_follow_external_symlink(tmp_path):
+def test_conformer_output_does_not_follow_external_symlink(tmp_path, symlink_or_skip):
     working = tmp_path / "working"
     working.mkdir()
     outside = tmp_path / "outside.xyz"
     outside.write_text("keep me")
-    (working / "conformer_1.xyz").symlink_to(outside)
+    symlink_or_skip(working / "conformer_1.xyz", outside)
     status, _, table = generate(str(working))
     assert "outside the working directory" in status
     assert table.empty

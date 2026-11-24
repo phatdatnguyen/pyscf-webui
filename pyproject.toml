@@ -11,8 +11,12 @@ requires-python = ">=3.10"
 license = { file = "LICENSE.txt" }
 
 dependencies = [
-    "pyscf>=2.9",
-    "pyscf-dispersion",
+    # Native Windows x64 wheels first appeared in PySCF 2.15; use its patched release.
+    "pyscf>=2.15.1; sys_platform == 'win32'",
+    "pyscf>=2.9; sys_platform != 'win32'",
+    # This extension has no native Windows distribution. Ordinary CPU calculations
+    # work without it; the engine rejects requested D3/D4 corrections if it is missing.
+    "pyscf-dispersion; sys_platform != 'win32'",
     # NMR J-couplings (pyscf.prop.ssc). Pure Python and small; gpu4pyscf has no spin-spin
     # module at all, so this is the only implementation in the stack.
     "pyscf-properties",

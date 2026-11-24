@@ -144,10 +144,10 @@ def test_paths_cannot_escape_working_directory(run_job, tmp_path, overrides):
     assert list(tmp_path.iterdir()) == []
 
 
-def test_output_symlink_cannot_overwrite_external_file(run_job, tmp_path):
+def test_output_symlink_cannot_overwrite_external_file(run_job, tmp_path, symlink_or_skip):
     outside = tmp_path.parent / (tmp_path.name + "_outside.json")
     outside.write_text("keep me")
-    (tmp_path / "test.job.json").symlink_to(outside)
+    symlink_or_skip(tmp_path / "test.job.json", outside)
     assert "Could not start" in list(run_job())[-1][0]
     assert outside.read_text() == "keep me"
 
