@@ -28,7 +28,8 @@ dependencies = [
     "fastapi",
     "uvicorn",
     "rdkit",
-    "nglview",
+    # Keep the working viewer release; 4.0.1 breaks rendering in this app.
+    "nglview==4.0.0",
     "ipywidgets",
     "plotly",
     "pandas",
